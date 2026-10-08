@@ -24,7 +24,9 @@ fn parse(bytes: &[u8]) -> Vec<Polyline> {
         let body = &rest[2..2 + n * 4];
         rest = &rest[2 + n * 4..];
         let points: Vec<(f64, f64)> = body
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|p| (int(&p[0..2]), int(&p[2..4])))
             .collect();
         let mut bbox = [f64::MAX, f64::MAX, f64::MIN, f64::MIN];

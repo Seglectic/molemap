@@ -4,20 +4,7 @@ A terminal control panel for [Mullvad VPN](https://mullvad.net). It shows every
 Mullvad relay on a zoomable world map. Click a city, or pick one from the list,
 and hit the big button to connect.
 
-```
- ★ MOLEMAP   MULLVAD VPN CONTROL PANEL                      536 RELAYS · 91 CITIES
-╔╡ WORLD MAP · ×6.0 ╞═══════════════════════════════════╗╔╡ RELAYS ╞═══════════════╗
-║  ⡀⠈Gothenburg ⢸⠖⠁   ⢀⡖⠁ ⠘⠤⠤⠓     ⠈⣗                    ║║▾ SWEDEN se              ║
-║ ⢀⡼Copenhagen    ⢸⡠⠤⠤⠤⠤⠤⠤⢤⣀⡀   ⢘⣆⡀                      ║║  ▸ Gothenburg (9)       ║
-║ Amsterdam   ★ Berlin, DE      Warsaw                   ║║  ▸ Malmö (11)           ║
-║ Brussels  Frankfurt ⢀⡈Prague       ⠉⠋⠉⠋⠓⠒⠲⠇Kyiv        ║║  ▸ Stockholm (17)       ║
-╚═══════════════════════════════════════════════════════╝╚═════════════════════════╝
-╔╡ STATUS ╞═════════════════════════════════════════════╗┏━━━━━━━━━━━━━━━━━━━━━━━━━┓
-║ STATE    ● DISCONNECTED  UNPROTECTED                  ║┃            ★            ┃
-║ LOCATION Somewhere, Earth                             ║┃      C O N N E C T      ┃
-║ TARGET   Berlin, Germany                              ║┃       tunnel down       ┃
-╚═══════════════════════════════════════════════════════╝┗━━━━━━━━━━━━━━━━━━━━━━━━━┛
-```
+![molemap zoomed in on Europe, connected through a relay in Kyiv](docs/screenshot.png)
 
 ## Features
 

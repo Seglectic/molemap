@@ -6,6 +6,9 @@
 //! work out from /proc how the app was started, ask it to quit, wait until it
 //! has, and start it again the same way.
 
+// Only Linux has an implementation; elsewhere the types exist but go unused.
+#![cfg_attr(not(target_os = "linux"), allow(dead_code))]
+
 use std::ffi::OsString;
 use std::path::PathBuf;
 
@@ -75,6 +78,7 @@ mod imp {
 
     use super::{AppGroup, Launch, Plan, Proc, Source};
     use crate::mullvad;
+    use crate::split::procs::{self, flatpak_id};
 
     /// How long the app gets to quit by itself before it's killed.
     const QUIT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -133,19 +137,6 @@ mod imp {
             .collect()
     }
 
-    fn flatpak_id(pid: u32) -> Option<String> {
-        let info = fs::read_to_string(format!("/proc/{pid}/root/.flatpak-info")).ok()?;
-        let mut in_app = false;
-        for line in info.lines() {
-            if line.starts_with('[') {
-                in_app = line == "[Application]";
-            } else if in_app && let Some(id) = line.strip_prefix("name=") {
-                return Some(id.trim().to_string());
-            }
-        }
-        None
-    }
-
     /// Chromium/Electron helper processes are started by the app itself.
     fn is_helper(argv: &[OsString]) -> bool {
         argv.iter()
@@ -156,23 +147,61 @@ mod imp {
     pub fn plan(group: &AppGroup) -> Result<Plan, String> {
         let in_group: HashSet<u32> = group.pids.iter().copied().collect();
         let mut procs = Vec::new();
-        let mut mains = Vec::new();
-        let mut launches: Vec<Launch> = Vec::new();
+        // (process, parent PID, arguments)
+        let mut members = Vec::new();
         for &pid in &group.pids {
             let Some((_, ppid, started)) = stat(pid) else {
                 continue;
             };
             let p = Proc { pid, started };
             procs.push(p);
-            if in_group.contains(&ppid) {
+            members.push((p, ppid, argv(pid)));
+        }
+
+        // A Flatpak app is restarted with `flatpak run`, taking its arguments
+        // from the app's own top process inside the sandbox; the sandbox
+        // plumbing around it (bwrap, wrapper scripts, proxies) isn't relaunched.
+        if let Some(id) = group.pids.iter().find_map(|&p| flatpak_id(p)) {
+            let app = procs::flatpak_app_name(&group.pids);
+            let mains: Vec<&(Proc, u32, Vec<OsString>)> = members
+                .iter()
+                .filter(|(p, ppid, argv)| {
+                    let name = procs::name(p.pid);
+                    !argv.is_empty()
+                        && !is_helper(argv)
+                        && name.is_some()
+                        && name == app
+                        && procs::name(*ppid) != name
+                        && flatpak_id(p.pid).as_deref() == Some(id.as_str())
+                })
+                .collect();
+            let Some((_, _, argv)) = mains.first() else {
+                return Err(format!("couldn't find {}'s main process", group.name));
+            };
+            let mut run: Vec<OsString> = vec!["run".into(), id.clone().into()];
+            run.extend(argv[1..].iter().cloned());
+            return Ok(Plan {
+                name: group.name.clone(),
+                procs,
+                mains: mains.iter().map(|(p, _, _)| *p).collect(),
+                launches: vec![Launch {
+                    program: "flatpak".into(),
+                    args: run,
+                    cwd: None,
+                    env: None,
+                    source: Source::Flatpak(id),
+                }],
+            });
+        }
+
+        let mut mains = Vec::new();
+        let mut launches: Vec<Launch> = Vec::new();
+        for (p, ppid, argv) in &members {
+            if in_group.contains(ppid) || argv.is_empty() || is_helper(argv) {
                 continue;
             }
-            let argv = argv(pid);
-            if argv.is_empty() || is_helper(&argv) {
-                continue;
-            }
-            let launch = launch_for(pid, &argv)?;
-            mains.push(p);
+            let launch = launch_for(p.pid, argv)?;
+            mains.push(*p);
             if !launches.contains(&launch) {
                 launches.push(launch);
             }
@@ -190,18 +219,6 @@ mod imp {
 
     fn launch_for(pid: u32, argv: &[OsString]) -> Result<Launch, String> {
         let args = argv[1..].to_vec();
-
-        if let Some(id) = flatpak_id(pid) {
-            let mut run: Vec<OsString> = vec!["run".into(), id.clone().into()];
-            run.extend(args);
-            return Ok(Launch {
-                program: "flatpak".into(),
-                args: run,
-                cwd: None,
-                env: None,
-                source: Source::Flatpak(id),
-            });
-        }
 
         let environ = fs::read(format!("/proc/{pid}/environ"))
             .map_err(|_| "can't read its environment".to_string())?;
@@ -312,6 +329,13 @@ mod imp {
                 .spawn()
                 .unwrap();
             let pid = child.id();
+            // Right after spawn the child may still be mid-exec.
+            for _ in 0..200 {
+                if argv(pid) == [OsString::from("sleep"), "30".into()] {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
             let group = AppGroup {
                 name: "sleep".into(),
                 pids: vec![pid],

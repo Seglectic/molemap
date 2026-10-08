@@ -188,7 +188,7 @@ impl Split {
         pids.sort_unstable();
 
         let keep = self.selected().map(|g| g.name.clone());
-        self.groups = group(&pids);
+        self.groups = families(&pids);
         let idx = keep
             .and_then(|name| self.groups.iter().position(|g| g.name == name))
             .or((!self.groups.is_empty()).then_some(0))
@@ -514,10 +514,105 @@ fn group(pids: &[u32]) -> Vec<AppGroup> {
         .collect()
 }
 
+/// Group excluded PIDs into apps. Everything an excluded process starts is
+/// excluded too, so each PID joins its topmost excluded ancestor's family.
+/// Families from the same Flatpak app merge (its D-Bus proxy gets handed off
+/// to systemd, but still carries the app's ID), and are named after the app
+/// inside rather than its sandbox plumbing.
+fn families(pids: &[u32]) -> Vec<AppGroup> {
+    let set: HashSet<u32> = pids.iter().copied().collect();
+    let mut by_top: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
+    for &pid in pids {
+        if procs::name(pid).is_none() {
+            continue; // exited
+        }
+        let mut top = pid;
+        for _ in 0..64 {
+            match procs::ppid(top) {
+                Some(parent) if parent != top && set.contains(&parent) => top = parent,
+                _ => break,
+            }
+        }
+        by_top.entry(top).or_default().push(pid);
+    }
+    // Merge by Flatpak app ID where there is one, else keep per family.
+    let mut by_app: BTreeMap<String, (u32, Vec<u32>)> = BTreeMap::new();
+    for (top, members) in by_top {
+        let key = members
+            .iter()
+            .find_map(|&p| procs::flatpak_id(p))
+            .unwrap_or_else(|| format!("pid {top}"));
+        by_app
+            .entry(key)
+            .or_insert((top, Vec::new()))
+            .1
+            .extend(members);
+    }
+    let mut by_name: BTreeMap<String, Vec<u32>> = BTreeMap::new();
+    for (_, (top, members)) in by_app {
+        let name = procs::flatpak_app_name(&members)
+            .or_else(|| procs::name(top))
+            .unwrap_or_else(|| top.to_string());
+        by_name.entry(name).or_default().extend(members);
+    }
+    by_name
+        .into_iter()
+        .map(|(name, mut pids)| {
+            pids.sort_unstable();
+            AppGroup { name, pids }
+        })
+        .collect()
+}
+
 #[cfg(target_os = "linux")]
-mod procs {
+pub(crate) mod procs {
+    use std::collections::HashMap;
     use std::fs;
     use std::os::unix::fs::MetadataExt;
+
+    /// Shells that wrap an app's real program (Flatpak launch scripts etc.).
+    pub const SHELLS: &[&str] = &["sh", "bash", "dash", "zsh", "fish"];
+
+    pub fn ppid(pid: u32) -> Option<u32> {
+        let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        stat[stat.rfind(')')? + 1..]
+            .split_whitespace()
+            .nth(1)?
+            .parse()
+            .ok()
+    }
+
+    /// The Flatpak app ID, if this process runs inside a Flatpak sandbox.
+    pub fn flatpak_id(pid: u32) -> Option<String> {
+        let info = fs::read_to_string(format!("/proc/{pid}/root/.flatpak-info")).ok()?;
+        let mut in_app = false;
+        for line in info.lines() {
+            if line.starts_with('[') {
+                in_app = line == "[Application]";
+            } else if in_app && let Some(id) = line.strip_prefix("name=") {
+                return Some(id.trim().to_string());
+            }
+        }
+        None
+    }
+
+    /// For processes that include a Flatpak app: the app's program name, i.e.
+    /// the most common name inside the sandbox, ignoring wrapper shells.
+    pub fn flatpak_app_name(pids: &[u32]) -> Option<String> {
+        let mut counts: HashMap<String, usize> = HashMap::new();
+        for &pid in pids {
+            if flatpak_id(pid).is_some()
+                && let Some(n) = name(pid)
+                && !SHELLS.contains(&n.as_str())
+            {
+                *counts.entry(n).or_default() += 1;
+            }
+        }
+        counts
+            .into_iter()
+            .max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(&a.0)))
+            .map(|(n, _)| n)
+    }
 
     /// Program name: the executable's file name, or `comm` when the
     /// executable can't be read (another user's process).
@@ -554,8 +649,20 @@ mod procs {
 }
 
 #[cfg(not(target_os = "linux"))]
-mod procs {
+pub(crate) mod procs {
     pub fn name(_pid: u32) -> Option<String> {
+        None
+    }
+
+    pub fn ppid(_pid: u32) -> Option<u32> {
+        None
+    }
+
+    pub fn flatpak_id(_pid: u32) -> Option<String> {
+        None
+    }
+
+    pub fn flatpak_app_name(_pids: &[u32]) -> Option<String> {
         None
     }
 
@@ -601,6 +708,21 @@ mod tests {
         split.changed(vec![me], false);
         split.set_list(Ok(vec![me]));
         assert!(!shown(&split), "stale list must not undo our removal");
+    }
+
+    #[test]
+    fn children_join_their_parents_family() {
+        let me = std::process::id();
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let families = families(&[me, child.id()]);
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert_eq!(families.len(), 1, "{families:?}");
+        assert_eq!(families[0].pids.len(), 2);
+        assert_eq!(Some(&families[0].name), procs::name(me).as_ref());
     }
 
     #[test]

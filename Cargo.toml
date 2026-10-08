@@ -9,7 +9,7 @@ repository = "https://github.com/Seglectic/molemap"
 readme = "README.md"
 keywords = ["mullvad", "vpn", "tui", "terminal", "ratatui"]
 categories = ["command-line-utilities"]
-exclude = ["/.github"]
+exclude = ["/.github", "/docs"]
 
 [dependencies]
 anyhow = "1.0.104"
