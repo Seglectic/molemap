@@ -1,0 +1,70 @@
+name: Release
+
+# Push a tag like `v0.1.0` to build binaries and publish a GitHub release.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  create-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes --verify-tag
+
+  build:
+    needs: create-release
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-gnu, os: ubuntu-latest }
+          - { target: aarch64-unknown-linux-gnu, os: ubuntu-24.04-arm }
+          - { target: x86_64-apple-darwin, os: macos-latest }
+          - { target: aarch64-apple-darwin, os: macos-latest }
+          - { target: x86_64-pc-windows-msvc, os: windows-latest }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Package (unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          name="molemap-$GITHUB_REF_NAME-${{ matrix.target }}"
+          mkdir "$name"
+          cp "target/${{ matrix.target }}/release/molemap" README.md LICENSE "$name/"
+          tar czf "$name.tar.gz" "$name"
+          shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
+          echo "ASSETS=$name.tar.gz $name.tar.gz.sha256" >> "$GITHUB_ENV"
+
+      - name: Package (windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          name="molemap-$GITHUB_REF_NAME-${{ matrix.target }}"
+          mkdir "$name"
+          cp "target/${{ matrix.target }}/release/molemap.exe" README.md LICENSE "$name/"
+          7z a "$name.zip" "$name" > /dev/null
+          sha256sum "$name.zip" > "$name.zip.sha256"
+          echo "ASSETS=$name.zip $name.zip.sha256" >> "$GITHUB_ENV"
+
+      - name: Upload
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$GITHUB_REF_NAME" $ASSETS --clobber

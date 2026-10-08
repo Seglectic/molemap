@@ -1,0 +1,12 @@
+/target
+
+# Local agent / editor state
+.claude/
+CLAUDE.md
+CLAUDE.local.md
+.vscode/
+.idea/
+
+# Secrets
+.env
+.env.*
